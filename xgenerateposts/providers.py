@@ -5,7 +5,7 @@ import re
 import urllib.error
 import urllib.request
 
-from xgenerateposts import config, net
+from xgenerateposts import config, net, progress
 from xgenerateposts.config import (
     CONSOLE_BILLING,
     CONSOLE_KEYS,
@@ -101,6 +101,7 @@ class AnthropicProvider:
     """Claude with Anthropic's server-side web_search tool. Paid."""
 
     name = "anthropic"
+    label = "Anthropic"
 
     def __init__(self) -> None:
         self.model = MODEL
@@ -129,12 +130,13 @@ class AnthropicProvider:
         if native_search:
             extra["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
         try:
-            response = anthropic.Anthropic().messages.create(
-                model=self.model,
-                max_tokens=3000,
-                messages=[{"role": "user", "content": prompt}],
-                **extra,
-            )
+            with progress.waiting_for(self.label):
+                response = anthropic.Anthropic().messages.create(
+                    model=self.model,
+                    max_tokens=3000,
+                    messages=[{"role": "user", "content": prompt}],
+                    **extra,
+                )
         except anthropic.AnthropicError as exc:
             raise SystemExit(f"\n{friendly_api_error(exc)}\n") from None
 
@@ -147,6 +149,7 @@ class OpenAICompatProvider:
     library. Base URL and model come from the environment (R4)."""
 
     name = "openai-compat"
+    label = "openai-compat"  # for progress lines (R52)
     key_var = "OPENAI_COMPAT_API_KEY"
     keys_url = ""  # depends on the service behind the base URL
 
@@ -205,6 +208,7 @@ class GroqProvider(OpenAICompatProvider):
     """Groq's free tier, with its server-side browser_search tool."""
 
     name = "groq"
+    label = "Groq"
     key_var = "GROQ_API_KEY"
     keys_url = GROQ_KEYS
 
@@ -249,7 +253,10 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
     )
     timeout = config.provider_timeout()
     try:
-        with net.HTTP_OPENER.open(request, timeout=timeout) as response:
+        with (
+            progress.waiting_for(provider.label),
+            net.HTTP_OPENER.open(request, timeout=timeout) as response,
+        ):
             raw = net.read_capped(response)
     except urllib.error.HTTPError as exc:
         message = friendly_http_error(provider, exc, native_search, error_body(exc))
