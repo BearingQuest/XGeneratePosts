@@ -104,6 +104,7 @@ class AnthropicProvider:
 
     name = "anthropic"
     label = "Anthropic"
+    usage: dict[str, int] | None = None  # not recorded for anthropic
 
     def __init__(self) -> None:
         self.model = MODEL
@@ -154,6 +155,7 @@ class OpenAICompatProvider:
     label = "openai-compat"  # for progress lines (R52)
     key_var = "OPENAI_COMPAT_API_KEY"
     keys_url = ""  # depends on the service behind the base URL
+    usage: dict[str, int] | None = None  # the last response's token counts (R53)
 
     def __init__(self) -> None:
         self.base_url = config.openai_compat_base_url()
@@ -194,6 +196,7 @@ class OpenAICompatProvider:
 
     def generate(self, prompt: str, native_search: bool = False) -> str:
         payload = chat_completion(self, self.request_body(prompt, native_search), native_search)
+        self.usage = token_usage(payload)
         try:
             text = payload["choices"][0]["message"]["content"]
         except KeyError, IndexError, TypeError:
@@ -301,6 +304,20 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
             f"\n{provider.name} returned something that is not JSON.\n\n"
             "  Check the base URL points at an OpenAI-compatible /v1 endpoint.\n"
         ) from None
+
+
+def token_usage(payload: dict) -> dict[str, int] | None:
+    """The response's prompt, completion and total token counts, those that
+    are present, for the run.log OK line (R53)."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    counts = {
+        name: usage[f"{name}_tokens"]
+        for name in ("prompt", "completion", "total")
+        if type(usage.get(f"{name}_tokens")) is int
+    }
+    return counts or None
 
 
 def suggested_wait(headers, body: str) -> float | None:

@@ -42,6 +42,16 @@ DEFAULT_RSS_PER_FEED = 3  # newest entries per feed, override with AI_POST_RSS_P
 # Total candidates sent, best topic match first, override with
 # AI_POST_RSS_MAX_ENTRIES. Keeps one call under Groq's free 8,000 TPM (R22).
 DEFAULT_RSS_MAX_ENTRIES = 20
+# R53: with --search rss, the lowest-ranked candidates are dropped until the
+# whole prompt's estimated size is within AI_POST_TOKEN_BUDGET. 7,000 leaves
+# 1,000 of Groq's free 8,000 tokens per minute for the chat template and for
+# text that tokenizes denser than the estimate. The arithmetic is in
+# docs/decisions.md.
+DEFAULT_TOKEN_BUDGET = 7000
+# UTF-8 bytes per token for the estimate. English prose runs nearer 4.2 with
+# GPT-style tokenizers; on the 3 Nov rss request, bytes / 4 came to 8,811
+# against Groq's reported 8,344.
+BYTES_PER_TOKEN = 4
 
 MAX_TWEET_TEXT = 255  # 280 minus ~24 chars X reserves for a t.co link
 MAX_LINKEDIN_TEXT = 1100  # hard ceiling; the prompt targets 750-950
@@ -162,6 +172,10 @@ def rss_per_feed() -> int:
 
 def rss_max_entries() -> int:
     return env_whole_number("AI_POST_RSS_MAX_ENTRIES", DEFAULT_RSS_MAX_ENTRIES)
+
+
+def token_budget() -> int:
+    return env_whole_number("AI_POST_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET)
 
 
 # ---------------------------------------------------------------------------

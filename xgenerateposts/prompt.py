@@ -1,9 +1,10 @@
 """Prompt scaffolding: platform mechanics. The voice comes from the profile.
 No I/O."""
 
+import math
 from datetime import date
 
-from xgenerateposts.config import MAX_LINKEDIN_TEXT, MAX_TWEET_TEXT
+from xgenerateposts.config import BYTES_PER_TOKEN, MAX_LINKEDIN_TEXT, MAX_TWEET_TEXT
 from xgenerateposts.feeds import clean_text
 
 X_RULES = """
@@ -121,6 +122,17 @@ LinkedIn post text WITHOUT the URL
 one sentence: why you picked it
 ===END===
 """.strip()
+
+
+# The profile sections build_prompt sends, for the over-budget message (R53).
+PROMPT_SECTIONS = ("beat", "voice", "experience", "never", "hashtags")
+
+
+def estimate_tokens(text: str) -> int:
+    """A conservative token count with no tokenizer (R53): UTF-8 bytes over
+    BYTES_PER_TOKEN, rounded up. Bytes, not characters, so dashes, curly
+    quotes and non-Latin text count for more, as they do in tokenizers."""
+    return math.ceil(len(text.encode("utf-8")) / BYTES_PER_TOKEN)
 
 
 def build_prompt(

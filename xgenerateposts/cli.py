@@ -62,6 +62,16 @@ def generate_item(
     provider, search, profile: dict, topic: str, used_urls: list, used_titles: list
 ) -> dict:
     candidates = search.candidates(used_urls, used_titles, topic)
+    if candidates is not None:
+        candidates = search.fit_budget(
+            lambda block: build_prompt(profile, topic, used_urls, used_titles, block)
+        )
+        if len(search.sent) < len(search.picked):
+            print(
+                f"Sending {len(search.sent)} of {len(search.picked)} feed entries "
+                "to fit the token budget",
+                file=sys.stderr,
+            )
     prompt = build_prompt(profile, topic, used_urls, used_titles, candidates)
     text = provider.generate(prompt, native_search=candidates is None)
 
@@ -217,7 +227,10 @@ def run() -> None:
     )
     save_history(history)
     log_drafts(item, topic, x_post, li_post, bool(tweet_id), bool(li_id), storage.RUN_VIA)
-    log_run(f"OK — [{topic}] {item['title']} ({item['url']})")
+    tokens = ""
+    if provider.usage:  # R53: to check the token estimate against real figures
+        tokens = " — tokens: " + ", ".join(f"{k} {v}" for k, v in provider.usage.items())
+    log_run(f"OK — [{topic}] {item['title']} ({item['url']}){tokens}")
 
     rule = "=" * 70
     print(rule)
