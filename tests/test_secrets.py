@@ -58,12 +58,19 @@ def test_connection_error_is_redacted(web, groq):
     assert "Could not reach groq" in exc.value.code
 
 
-def test_429_suggests_waiting_and_rss(web, groq):
+@pytest.fixture
+def no_retry(monkeypatch):
+    """The R24 message on its own: retries off (R51 is in test_rate_limit.py)."""
+    monkeypatch.setenv("AI_POST_RATE_LIMIT_WAIT", "0")
+
+
+def test_429_suggests_waiting_and_rss(web, groq, no_retry):
     web.add(GROQ_URL, error_body("Rate limit reached"), status=429, headers={"retry-after": "7"})
     with pytest.raises(SystemExit) as exc:
         groq.generate("prompt", native_search=True)
     assert "waiting 7 seconds" in exc.value.code
     assert "--search rss" in exc.value.code
+    assert len(web.requests) == 1
 
 
 def without_nothing_lost(message):
@@ -72,7 +79,7 @@ def without_nothing_lost(message):
 
 
 @pytest.mark.parametrize("native", [True, False])
-def test_429_says_wait_with_retry_after(web, groq, native):
+def test_429_says_wait_with_retry_after(web, groq, native, no_retry):
     """R24"""
     web.add(
         GROQ_URL,
@@ -88,6 +95,7 @@ def test_429_says_wait_with_retry_after(web, groq, native):
     assert SENTINEL_KEY not in message
     without_nothing_lost(message)
     assert ("--search rss" in message) is native  # nothing to switch to in rss mode
+    assert len(web.requests) == 1
 
 
 def test_429_without_retry_after_still_says_wait(web, groq):
@@ -96,6 +104,7 @@ def test_429_without_retry_after_still_says_wait(web, groq):
         groq.generate("prompt")
     assert "Wait a minute" in exc.value.code
     assert "suggests waiting" not in exc.value.code
+    assert len(web.requests) == 1  # no suggested wait, so no retry
 
 
 @pytest.mark.parametrize(
@@ -166,9 +175,8 @@ REAL_413 = (
         (413, REAL_413, ["Limit 8000", "Requested 8344"]),
     ],
 )
-def test_real_groq_errors_lose_org_id_and_upsell(monkeypatch, web, groq, status, message, figures):
+def test_real_groq_errors_lose_org_id_and_upsell(web, groq, no_retry, status, message, figures):
     """R54"""
-    monkeypatch.setenv("AI_POST_RATE_LIMIT_WAIT", "0")
     web.add(GROQ_URL, error_body(message), status=status)
     with pytest.raises(SystemExit) as exc:
         groq.generate("prompt", native_search=True)

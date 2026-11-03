@@ -1,6 +1,7 @@
 """Providers: each takes the assembled prompt and returns the model's raw text."""
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from xgenerateposts.config import (
     MODEL,
     NOTHING_LOST,
     PROVIDERS,
+    RATE_LIMIT_MARGIN,
 )
 
 
@@ -240,6 +242,7 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
     """POST to {base_url}/chat/completions and return the parsed JSON.
 
     Every expected failure exits with a remedy; the API key is never shown.
+    A 429 with a short enough suggested wait is retried once (R51).
     """
     key = provider.api_key()
     headers = {"Content-Type": "application/json", "User-Agent": HTTP_USER_AGENT}
@@ -252,30 +255,44 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
         method="POST",
     )
     timeout = config.provider_timeout()
-    try:
-        with (
-            progress.waiting_for(provider.label),
-            net.HTTP_OPENER.open(request, timeout=timeout) as response,
-        ):
-            raw = net.read_capped(response)
-    except urllib.error.HTTPError as exc:
-        message = friendly_http_error(provider, exc, native_search, error_body(exc))
-        raise SystemExit(f"\n{net.redact(message, key)}\n") from None
-    except TimeoutError:
-        raise SystemExit(timeout_message(provider, timeout)) from None
-    except urllib.error.URLError as exc:
-        if isinstance(exc.reason, TimeoutError):
+    max_wait = config.rate_limit_wait()
+    for attempt in (1, 2):
+        try:
+            with (
+                progress.waiting_for(provider.label),
+                net.HTTP_OPENER.open(request, timeout=timeout) as response,
+            ):
+                raw = net.read_capped(response)
+            break
+        except urllib.error.HTTPError as exc:
+            text = error_body(exc)
+            wait = suggested_wait(exc.headers, text) if exc.code == 429 else None
+            if attempt == 1 and wait is not None and max_wait > 0 and wait <= max_wait:
+                reason = f"{provider.label}'s {limit_reason(text)}"
+                progress.countdown(wait + RATE_LIMIT_MARGIN, reason)
+                continue
+            message = friendly_http_error(provider, exc, native_search, text)
+            if attempt == 1 and wait is not None and 0 < max_wait < wait:
+                message += (
+                    f"\n\n  {provider.label} asked for {wait:g} s, longer than "
+                    f"AI_POST_RATE_LIMIT_WAIT ({max_wait}), so it didn't wait."
+                )
+            raise SystemExit(f"\n{net.redact(message, key)}\n") from None
+        except TimeoutError:
             raise SystemExit(timeout_message(provider, timeout)) from None
-        raise SystemExit(
-            net.redact(
-                f"\nCould not reach {provider.name} at {provider.base_url}: {exc.reason}\n\n"
-                "  Check your network connection, then re-run.\n\n"
-                f"  {NOTHING_LOST}\n",
-                key,
-            )
-        ) from None
-    except ValueError as exc:
-        raise SystemExit(f"\n{provider.name} response refused: {exc}.\n") from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise SystemExit(timeout_message(provider, timeout)) from None
+            raise SystemExit(
+                net.redact(
+                    f"\nCould not reach {provider.name} at {provider.base_url}: {exc.reason}\n\n"
+                    "  Check your network connection, then re-run.\n\n"
+                    f"  {NOTHING_LOST}\n",
+                    key,
+                )
+            ) from None
+        except ValueError as exc:
+            raise SystemExit(f"\n{provider.name} response refused: {exc}.\n") from None
 
     try:
         return json.loads(raw)
@@ -284,6 +301,36 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
             f"\n{provider.name} returned something that is not JSON.\n\n"
             "  Check the base URL points at an OpenAI-compatible /v1 endpoint.\n"
         ) from None
+
+
+def suggested_wait(headers, body: str) -> float | None:
+    """Seconds a 429 asks us to wait: the retry-after header, else "try again
+    in 27.195s" in the body. Other forms ("1m30s", "450ms") give None, so
+    they are never retried (R51)."""
+    retry = headers.get("retry-after") if headers else None
+    if retry:
+        try:
+            seconds = float(retry.strip())
+        except ValueError:  # an HTTP-date; fall back to the body
+            seconds = -1.0
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    found = re.search(r"try again in (\d+(?:\.\d+)?)s\b", body, re.IGNORECASE)
+    return float(found.group(1)) if found else None
+
+
+def limit_reason(body: str) -> str:
+    """Which limit a 429 hit, in words, for the countdown line (R52)."""
+    text = body.lower()
+    for phrase, reason in (
+        ("tokens per minute", "per-minute token limit"),
+        ("requests per minute", "per-minute request limit"),
+        ("tokens per day", "daily token limit"),
+        ("requests per day", "daily request limit"),
+    ):
+        if phrase in text:
+            return reason
+    return "rate limit"
 
 
 def timeout_message(provider: OpenAICompatProvider, timeout: float) -> str:
