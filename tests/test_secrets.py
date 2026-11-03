@@ -143,6 +143,73 @@ def test_http_errors_map_to_remedies(web, groq, status, phrase):
     assert phrase in exc.value.code
 
 
+FAKE_ORG = "org_01fakeorgid0000000000000000"
+UPSELL = "Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing"
+# The two real 3 Nov messages, with a fake organization ID. The upgrade
+# sentence's URL tail is reconstructed: the original was cut off at 300.
+REAL_429 = (
+    f"Rate limit reached for model `openai/gpt-oss-120b` in organization `{FAKE_ORG}` "
+    "service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5473, "
+    f"Requested 6153. Please try again in 27.195s. {UPSELL}"
+)
+REAL_413 = (
+    f"Request too large for model `openai/gpt-oss-120b` in organization `{FAKE_ORG}` "
+    "service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 8344, "
+    f"please reduce your message size and try again. {UPSELL}"
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "figures"),
+    [
+        (429, REAL_429, ["Limit 8000", "Used 5473", "Requested 6153", "27.195s"]),
+        (413, REAL_413, ["Limit 8000", "Requested 8344"]),
+    ],
+)
+def test_real_groq_errors_lose_org_id_and_upsell(monkeypatch, web, groq, status, message, figures):
+    """R54"""
+    monkeypatch.setenv("AI_POST_RATE_LIMIT_WAIT", "0")
+    web.add(GROQ_URL, error_body(message), status=status)
+    with pytest.raises(SystemExit) as exc:
+        groq.generate("prompt", native_search=True)
+    shown = exc.value.code
+    assert FAKE_ORG not in shown
+    assert "org_…" in shown
+    assert "Need more tokens" not in shown
+    assert "Upgrade" not in shown
+    assert "console.groq.com/settings/billing" not in shown
+    for figure in figures:
+        assert figure in shown
+    detail = providers.clean_detail(message)
+    assert detail.endswith(".")
+    assert len(detail) <= providers.MAX_DETAIL
+
+
+def test_long_detail_is_cut_at_a_word_boundary_not_mid_url():
+    """R54"""
+    text = "x" * 200 + " see https://status.example/" + "a" * 80 + " for details and more words"
+    detail = providers.clean_detail(text)
+    assert len(detail) <= providers.MAX_DETAIL
+    assert detail.endswith("…")
+    assert "https://status.example" not in detail  # the URL is dropped whole, not cut
+
+
+def test_long_detail_prefers_a_sentence_boundary():
+    text = "First sentence is long enough. " * 6 + "Second part " * 20
+    detail = providers.clean_detail(text)
+    assert len(detail) <= providers.MAX_DETAIL
+    assert detail.endswith("enough. …")
+
+
+def test_key_straddling_the_cut_is_still_redacted(monkeypatch, web, groq):
+    """R54: redaction runs before shortening, so no fragment of the key survives."""
+    message = "y" * (providers.MAX_DETAIL - 10) + SENTINEL_KEY + " trailing"
+    web.add(GROQ_URL, error_body(message), status=400)
+    with pytest.raises(SystemExit) as exc:
+        groq.generate("prompt")
+    assert SENTINEL_KEY[:10] not in exc.value.code
+
+
 def test_response_without_text_exits(web, groq):
     web.add(GROQ_URL, {"choices": []})
     with pytest.raises(SystemExit) as exc:

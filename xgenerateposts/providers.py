@@ -252,7 +252,7 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
         with net.HTTP_OPENER.open(request, timeout=timeout) as response:
             raw = net.read_capped(response)
     except urllib.error.HTTPError as exc:
-        message = friendly_http_error(provider, exc, native_search)
+        message = friendly_http_error(provider, exc, native_search, error_body(exc))
         raise SystemExit(f"\n{net.redact(message, key)}\n") from None
     except TimeoutError:
         raise SystemExit(timeout_message(provider, timeout)) from None
@@ -287,22 +287,53 @@ def timeout_message(provider: OpenAICompatProvider, timeout: float) -> str:
     )
 
 
+def error_body(exc: urllib.error.HTTPError) -> str:
+    """The error response's body, read once so it can be both parsed and shown."""
+    try:
+        return exc.read(4000).decode("utf-8", "replace")
+    except OSError, AttributeError:  # no body attached
+        return ""
+
+
+# R54: sentences that sell a paid plan, which the $0 rule rules out anyway.
+UPSELL = re.compile(
+    r"need more tokens\?|\bupgrade to\b|\bupgrade your\b|\bdev tier\b|/settings/billing",
+    re.IGNORECASE,
+)
+MAX_DETAIL = 300
+
+
+def clean_detail(text: str, key: str = "", limit: int = MAX_DETAIL) -> str:
+    """Provider error text fit to show and log (R54): organization IDs
+    masked, upgrade offers dropped, the key redacted, then shortened at a
+    sentence or word boundary. Redaction comes before shortening, so a key
+    can't be cut in half and slip past it."""
+    text = re.sub(r"org_[A-Za-z0-9]+", "org_…", text.strip())
+    sentences = re.split(r"(?<=[.?!])\s+", text)
+    text = " ".join(s for s in sentences if not UPSELL.search(s))
+    text = net.redact(text, key)
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 2]  # room for the " …"
+    ends = [m.end() for m in re.finditer(r"[.?!](?=\s)", head)]
+    if ends and ends[-1] >= limit // 2:
+        return head[: ends[-1]] + " …"
+    space = head.rfind(" ")
+    return (head[:space] if space > 0 else head).rstrip() + "…"
+
+
 def friendly_http_error(
-    provider: OpenAICompatProvider, exc: urllib.error.HTTPError, native_search: bool
+    provider: OpenAICompatProvider, exc: urllib.error.HTTPError, native_search: bool, body: str
 ) -> str:
     """Turn an HTTP error from an OpenAI-compatible API into a remedy.
 
     Error bodies look like {"error": {"message": ..., "type": ...}}.
     """
     try:
-        body = exc.read(4000).decode("utf-8", "replace")
-    except OSError, AttributeError:  # no body attached
-        body = ""
-    try:
         detail = str(json.loads(body)["error"]["message"])
     except ValueError, KeyError, TypeError:
-        detail = body.strip()
-    detail = detail[:300] or "(no detail)"
+        detail = body
+    detail = clean_detail(detail, provider.api_key()) or "(no detail)"
     code = exc.code
     name = provider.name
     where = f" Create a new one at {provider.keys_url}." if provider.keys_url else ""
