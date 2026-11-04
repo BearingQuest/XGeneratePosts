@@ -1,13 +1,17 @@
-"""R55: credentials never follow a redirect to another origin. Redirects go
-through the real opener, served by FakeWeb."""
+"""R55: credentials never follow a redirect to another origin. R56: LinkedIn
+goes through the shared opener. Redirects go through the real opener, served
+by FakeWeb."""
 
+import urllib.error
 import urllib.request
 
 import pytest
 
-from xgenerateposts import net
+from xgenerateposts import config, net, publish
 
 TOKEN = "Bearer tok_SENTINEL_0123456789"  # noqa: S105 - fake token for assertions
+LINKEDIN_POSTS = "https://api.linkedin.com/rest/posts"
+LINKEDIN_TOKEN = "li_SENTINEL_do_not_print_0123456789"  # noqa: S105 - fake token
 
 
 def header_names(req):
@@ -74,3 +78,58 @@ def test_unparseable_port_counts_as_another_origin():
     assert net.origin("https://a.example:99999999/") is None
     assert not net.same_origin("https://a.example:99999999/", "https://a.example:99999999/")
     assert net.same_origin("HTTPS://A.example/x", "https://a.example:443/y")
+
+
+@pytest.fixture
+def linkedin(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_ACCESS_TOKEN", LINKEDIN_TOKEN)
+    monkeypatch.setenv("LINKEDIN_AUTHOR_URN", "urn:li:person:TEST")
+
+
+def test_linkedin_uses_the_shared_opener_with_the_timeout(web, linkedin):
+    web.add(LINKEDIN_POSTS, status=201, headers={"x-restli-id": "urn:li:share:1"})
+    assert publish.post_to_linkedin("hello") == "urn:li:share:1"
+    (request,) = web.requests
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == f"Bearer {LINKEDIN_TOKEN}"
+    assert request.timeout == config.LINKEDIN_TIMEOUT
+
+
+def test_linkedin_oversized_response_is_refused(web, linkedin):
+    web.add(LINKEDIN_POSTS, b"x" * (config.MAX_RESPONSE_BYTES + 1), status=201)
+    with pytest.raises(SystemExit) as exc:
+        publish.post_to_linkedin("hello")
+    assert "LinkedIn response refused: response is larger than 2,000,000 bytes" in exc.value.code
+    assert "may have published the post" in exc.value.code
+
+
+def test_linkedin_read_timeout_says_the_post_may_be_live(web, linkedin):
+    web.add(LINKEDIN_POSTS, TimeoutError("timed out"))
+    with pytest.raises(SystemExit) as exc:
+        publish.post_to_linkedin("hello")
+    assert "within 30 seconds" in exc.value.code
+    assert "may have published the post" in exc.value.code
+
+
+def test_linkedin_cross_origin_redirect_sends_no_token(web, linkedin, capsys):
+    web.redirect(LINKEDIN_POSTS, "https://elsewhere.example/landing", status=302)
+    web.add("https://elsewhere.example/landing", b"ok")
+    publish.post_to_linkedin("hello")
+    first, second = web.requests
+    assert first.get_header("Authorization") == f"Bearer {LINKEDIN_TOKEN}"
+    assert "authorization" not in header_names(second)
+    assert all(LINKEDIN_TOKEN not in value for _, value in second.header_items())
+    assert LINKEDIN_TOKEN not in "".join(capsys.readouterr())
+
+
+def test_linkedin_error_messages_are_unchanged(web, linkedin):
+    web.add(LINKEDIN_POSTS, b'{"message": "bad version"}', status=426)
+    with pytest.raises(SystemExit) as exc:
+        publish.post_to_linkedin("hello")
+    assert exc.value.code.startswith('\nLinkedIn rejected the post (426):\n\n  {"message"')
+    assert "LINKEDIN_API_VERSION" in exc.value.code
+
+    web.add(LINKEDIN_POSTS, urllib.error.URLError("no route"))
+    with pytest.raises(SystemExit) as exc:
+        publish.post_to_linkedin("hello")
+    assert exc.value.code == "\nCould not reach LinkedIn: no route\n"

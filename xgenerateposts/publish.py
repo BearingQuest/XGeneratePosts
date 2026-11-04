@@ -4,7 +4,12 @@ import json
 import urllib.error
 import urllib.request
 
-from xgenerateposts import config
+from xgenerateposts import config, net
+
+MAYBE_POSTED = (
+    "  LinkedIn may have published the post before this failed; check your\n"
+    "  profile before re-running.\n"
+)
 
 
 def post_to_x(post: str) -> str:
@@ -87,12 +92,11 @@ def post_to_linkedin(post: str) -> str:
         method="POST",
     )
     try:
-        # The Request URL is the literal https://api.linkedin.com/rest/posts.
-        # nosemgrep: dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        with urllib.request.urlopen(request) as response:  # noqa: S310 - hardcoded https://api.linkedin.com URL
+        with net.HTTP_OPENER.open(request, timeout=config.LINKEDIN_TIMEOUT) as response:
+            net.read_capped(response)
             return response.headers.get("x-restli-id", "posted")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode()[:300]
+        body = exc.read(4000).decode("utf-8", "replace")[:300]
         raise SystemExit(
             f"\nLinkedIn rejected the post ({exc.code}):\n\n  {body}\n\n"
             "  LinkedIn revises its API version header on a schedule — if\n"
@@ -101,3 +105,10 @@ def post_to_linkedin(post: str) -> str:
         ) from None
     except urllib.error.URLError as exc:
         raise SystemExit(f"\nCould not reach LinkedIn: {exc.reason}\n") from None
+    except TimeoutError:
+        raise SystemExit(
+            f"\nLinkedIn sent no complete response within {config.LINKEDIN_TIMEOUT:g} seconds.\n\n"
+            + MAYBE_POSTED
+        ) from None
+    except ValueError as exc:
+        raise SystemExit(f"\nLinkedIn response refused: {exc}.\n\n" + MAYBE_POSTED) from None

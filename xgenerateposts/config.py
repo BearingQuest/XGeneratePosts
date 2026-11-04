@@ -38,6 +38,7 @@ MAX_FEED_BYTES = 10_000_000  # feeds get their own cap; some run past 2 MB (R23)
 SEARCH_SOURCES = ("native", "rss")
 NATIVE_SEARCH_PROVIDERS = ("anthropic", "groq")  # default to native; others to rss
 FEED_TIMEOUT = 15.0  # seconds per feed request (R20)
+LINKEDIN_TIMEOUT = 30.0  # seconds for the one --post-linkedin request (R56)
 DEFAULT_RSS_PER_FEED = 3  # newest entries per feed, override with AI_POST_RSS_PER_FEED
 # Total candidates sent, best topic match first, override with
 # AI_POST_RSS_MAX_ENTRIES. Keeps one call under Groq's free 8,000 TPM (R22).
