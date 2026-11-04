@@ -84,6 +84,10 @@ class FakeWeb(urllib.request.HTTPSHandler):
     are handled by urllib itself, including NoDowngradeRedirectHandler.
     """
 
+    # build_opener still adds urllib's HTTPHandler (500), and on a tie the one
+    # added first wins, so this sorts ahead of it for http:// URLs.
+    handler_order = 499
+
     def __init__(self):
         super().__init__()
         self.routes = {}
