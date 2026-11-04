@@ -1,11 +1,12 @@
 """Providers: each takes the assembled prompt and returns the model's raw text."""
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
 
-from xgenerateposts import config, net
+from xgenerateposts import config, net, progress
 from xgenerateposts.config import (
     CONSOLE_BILLING,
     CONSOLE_KEYS,
@@ -19,6 +20,7 @@ from xgenerateposts.config import (
     MODEL,
     NOTHING_LOST,
     PROVIDERS,
+    RATE_LIMIT_MARGIN,
 )
 
 
@@ -101,6 +103,8 @@ class AnthropicProvider:
     """Claude with Anthropic's server-side web_search tool. Paid."""
 
     name = "anthropic"
+    label = "Anthropic"
+    usage: dict[str, int] | None = None  # not recorded for anthropic
 
     def __init__(self) -> None:
         self.model = MODEL
@@ -129,12 +133,13 @@ class AnthropicProvider:
         if native_search:
             extra["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
         try:
-            response = anthropic.Anthropic().messages.create(
-                model=self.model,
-                max_tokens=3000,
-                messages=[{"role": "user", "content": prompt}],
-                **extra,
-            )
+            with progress.waiting_for(self.label):
+                response = anthropic.Anthropic().messages.create(
+                    model=self.model,
+                    max_tokens=3000,
+                    messages=[{"role": "user", "content": prompt}],
+                    **extra,
+                )
         except anthropic.AnthropicError as exc:
             raise SystemExit(f"\n{friendly_api_error(exc)}\n") from None
 
@@ -147,8 +152,10 @@ class OpenAICompatProvider:
     library. Base URL and model come from the environment (R4)."""
 
     name = "openai-compat"
+    label = "openai-compat"  # for progress lines (R52)
     key_var = "OPENAI_COMPAT_API_KEY"
     keys_url = ""  # depends on the service behind the base URL
+    usage: dict[str, int] | None = None  # the last response's token counts (R53)
 
     def __init__(self) -> None:
         self.base_url = config.openai_compat_base_url()
@@ -189,6 +196,7 @@ class OpenAICompatProvider:
 
     def generate(self, prompt: str, native_search: bool = False) -> str:
         payload = chat_completion(self, self.request_body(prompt, native_search), native_search)
+        self.usage = token_usage(payload)
         try:
             text = payload["choices"][0]["message"]["content"]
         except KeyError, IndexError, TypeError:
@@ -205,6 +213,7 @@ class GroqProvider(OpenAICompatProvider):
     """Groq's free tier, with its server-side browser_search tool."""
 
     name = "groq"
+    label = "Groq"
     key_var = "GROQ_API_KEY"
     keys_url = GROQ_KEYS
 
@@ -236,6 +245,7 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
     """POST to {base_url}/chat/completions and return the parsed JSON.
 
     Every expected failure exits with a remedy; the API key is never shown.
+    A 429 with a short enough suggested wait is retried once (R51).
     """
     key = provider.api_key()
     headers = {"Content-Type": "application/json", "User-Agent": HTTP_USER_AGENT}
@@ -248,27 +258,44 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
         method="POST",
     )
     timeout = config.provider_timeout()
-    try:
-        with net.HTTP_OPENER.open(request, timeout=timeout) as response:
-            raw = net.read_capped(response)
-    except urllib.error.HTTPError as exc:
-        message = friendly_http_error(provider, exc, native_search)
-        raise SystemExit(f"\n{net.redact(message, key)}\n") from None
-    except TimeoutError:
-        raise SystemExit(timeout_message(provider, timeout)) from None
-    except urllib.error.URLError as exc:
-        if isinstance(exc.reason, TimeoutError):
+    max_wait = config.rate_limit_wait()
+    for attempt in (1, 2):
+        try:
+            with (
+                progress.waiting_for(provider.label),
+                net.HTTP_OPENER.open(request, timeout=timeout) as response,
+            ):
+                raw = net.read_capped(response)
+            break
+        except urllib.error.HTTPError as exc:
+            text = error_body(exc)
+            wait = suggested_wait(exc.headers, text) if exc.code == 429 else None
+            if attempt == 1 and wait is not None and max_wait > 0 and wait <= max_wait:
+                reason = f"{provider.label}'s {limit_reason(text)}"
+                progress.countdown(wait + RATE_LIMIT_MARGIN, reason)
+                continue
+            message = friendly_http_error(provider, exc, native_search, text)
+            if attempt == 1 and wait is not None and 0 < max_wait < wait:
+                message += (
+                    f"\n\n  {provider.label} asked for {wait:g} s, longer than "
+                    f"AI_POST_RATE_LIMIT_WAIT ({max_wait}), so it didn't wait."
+                )
+            raise SystemExit(f"\n{net.redact(message, key)}\n") from None
+        except TimeoutError:
             raise SystemExit(timeout_message(provider, timeout)) from None
-        raise SystemExit(
-            net.redact(
-                f"\nCould not reach {provider.name} at {provider.base_url}: {exc.reason}\n\n"
-                "  Check your network connection, then re-run.\n\n"
-                f"  {NOTHING_LOST}\n",
-                key,
-            )
-        ) from None
-    except ValueError as exc:
-        raise SystemExit(f"\n{provider.name} response refused: {exc}.\n") from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise SystemExit(timeout_message(provider, timeout)) from None
+            raise SystemExit(
+                net.redact(
+                    f"\nCould not reach {provider.name} at {provider.base_url}: {exc.reason}\n\n"
+                    "  Check your network connection, then re-run.\n\n"
+                    f"  {NOTHING_LOST}\n",
+                    key,
+                )
+            ) from None
+        except ValueError as exc:
+            raise SystemExit(f"\n{provider.name} response refused: {exc}.\n") from None
 
     try:
         return json.loads(raw)
@@ -279,6 +306,50 @@ def chat_completion(provider: OpenAICompatProvider, body: dict, native_search: b
         ) from None
 
 
+def token_usage(payload: dict) -> dict[str, int] | None:
+    """The response's prompt, completion and total token counts, those that
+    are present, for the run.log OK line (R53)."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    counts = {
+        name: usage[f"{name}_tokens"]
+        for name in ("prompt", "completion", "total")
+        if type(usage.get(f"{name}_tokens")) is int
+    }
+    return counts or None
+
+
+def suggested_wait(headers, body: str) -> float | None:
+    """Seconds a 429 asks us to wait: the retry-after header, else "try again
+    in 27.195s" in the body. Other forms ("1m30s", "450ms") give None, so
+    they are never retried (R51)."""
+    retry = headers.get("retry-after") if headers else None
+    if retry:
+        try:
+            seconds = float(retry.strip())
+        except ValueError:  # an HTTP-date; fall back to the body
+            seconds = -1.0
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    found = re.search(r"try again in (\d+(?:\.\d+)?)s\b", body, re.IGNORECASE)
+    return float(found.group(1)) if found else None
+
+
+def limit_reason(body: str) -> str:
+    """Which limit a 429 hit, in words, for the countdown line (R52)."""
+    text = body.lower()
+    for phrase, reason in (
+        ("tokens per minute", "per-minute token limit"),
+        ("requests per minute", "per-minute request limit"),
+        ("tokens per day", "daily token limit"),
+        ("requests per day", "daily request limit"),
+    ):
+        if phrase in text:
+            return reason
+    return "rate limit"
+
+
 def timeout_message(provider: OpenAICompatProvider, timeout: float) -> str:
     return (
         f"\n{provider.name} sent no response within {timeout:g} seconds.\n\n"
@@ -287,22 +358,53 @@ def timeout_message(provider: OpenAICompatProvider, timeout: float) -> str:
     )
 
 
+def error_body(exc: urllib.error.HTTPError) -> str:
+    """The error response's body, read once so it can be both parsed and shown."""
+    try:
+        return exc.read(4000).decode("utf-8", "replace")
+    except OSError, AttributeError:  # no body attached
+        return ""
+
+
+# R54: sentences that sell a paid plan, which the $0 rule rules out anyway.
+UPSELL = re.compile(
+    r"need more tokens\?|\bupgrade to\b|\bupgrade your\b|\bdev tier\b|/settings/billing",
+    re.IGNORECASE,
+)
+MAX_DETAIL = 300
+
+
+def clean_detail(text: str, key: str = "", limit: int = MAX_DETAIL) -> str:
+    """Provider error text fit to show and log (R54): organization IDs
+    masked, upgrade offers dropped, the key redacted, then shortened at a
+    sentence or word boundary. Redaction comes before shortening, so a key
+    can't be cut in half and slip past it."""
+    text = re.sub(r"org_[A-Za-z0-9]+", "org_…", text.strip())
+    sentences = re.split(r"(?<=[.?!])\s+", text)
+    text = " ".join(s for s in sentences if not UPSELL.search(s))
+    text = net.redact(text, key)
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 2]  # room for the " …"
+    ends = [m.end() for m in re.finditer(r"[.?!](?=\s)", head)]
+    if ends and ends[-1] >= limit // 2:
+        return head[: ends[-1]] + " …"
+    space = head.rfind(" ")
+    return (head[:space] if space > 0 else head).rstrip() + "…"
+
+
 def friendly_http_error(
-    provider: OpenAICompatProvider, exc: urllib.error.HTTPError, native_search: bool
+    provider: OpenAICompatProvider, exc: urllib.error.HTTPError, native_search: bool, body: str
 ) -> str:
     """Turn an HTTP error from an OpenAI-compatible API into a remedy.
 
     Error bodies look like {"error": {"message": ..., "type": ...}}.
     """
     try:
-        body = exc.read(4000).decode("utf-8", "replace")
-    except OSError, AttributeError:  # no body attached
-        body = ""
-    try:
         detail = str(json.loads(body)["error"]["message"])
     except ValueError, KeyError, TypeError:
-        detail = body.strip()
-    detail = detail[:300] or "(no detail)"
+        detail = body
+    detail = clean_detail(detail, provider.api_key()) or "(no detail)"
     code = exc.code
     name = provider.name
     where = f" Create a new one at {provider.keys_url}." if provider.keys_url else ""

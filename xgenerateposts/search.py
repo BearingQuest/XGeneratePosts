@@ -4,6 +4,7 @@ when the provider searches the web itself."""
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from xgenerateposts import config, net
@@ -16,7 +17,15 @@ from xgenerateposts.config import (
     SEARCH_SOURCES,
 )
 from xgenerateposts.dedup import is_used
-from xgenerateposts.feeds import format_candidates, newest, parse_feed, ranked, require_expat
+from xgenerateposts.feeds import (
+    FeedEntry,
+    format_candidates,
+    newest,
+    parse_feed,
+    ranked,
+    require_expat,
+)
+from xgenerateposts.prompt import PROMPT_SECTIONS, estimate_tokens
 from xgenerateposts.storage import warn
 
 
@@ -97,10 +106,13 @@ class RssSearch:
 
     def __init__(self, profile: dict) -> None:
         require_expat()
+        self.profile = profile
         self.feeds = parse_feeds(profile)
         self.per_feed = config.rss_per_feed()
         self.max_entries = config.rss_max_entries()
         self.links: set[str] = set()
+        self.picked: list[FeedEntry] = []  # ranked and capped (R22)
+        self.sent: list[FeedEntry] = []  # what fit the token budget (R53)
 
     def candidates(self, used_urls: list, used_titles: list, topic: str) -> str:
         picked = []
@@ -126,9 +138,32 @@ class RssSearch:
                 f"\nNo feed yielded a new entry ({len(self.feeds)} tried). "
                 f"The reasons are in {config.log_file()}.\n\n  {NOTHING_LOST}\n"
             )
-        picked = ranked(picked, topic, self.max_entries)
-        self.links = {e["link"] for e in picked}
-        return format_candidates(picked)
+        self.picked = ranked(picked, topic, self.max_entries)
+        self.links = {e["link"] for e in self.picked}
+        return format_candidates(self.picked)
+
+    def fit_budget(self, build: Callable[[str], str]) -> str:
+        """Drop the lowest-ranked candidates until the estimate of the whole
+        prompt, `build(block)`, is within AI_POST_TOKEN_BUDGET (R53). Returns
+        the block to send; `sent` and `links` match it."""
+        budget = config.token_budget()
+        kept = list(self.picked)
+        while kept and estimate_tokens(build(format_candidates(kept))) > budget:
+            kept.pop()
+        if not kept:
+            base = estimate_tokens(build(""))
+            size = sum(len(self.profile.get(k, "")) for k in PROMPT_SECTIONS)
+            raise SystemExit(
+                f"\nThe prompt is about {base:,} tokens before any feed entry, so not even\n"
+                f"  one entry fits in AI_POST_TOKEN_BUDGET ({budget:,}). Your author profile's\n"
+                f"  Beat, Voice, Experience, Never and Hashtags sections, which go into\n"
+                f"  every prompt, come to {size:,} characters.\n\n"
+                "  Shorten those sections, or raise AI_POST_TOKEN_BUDGET if your\n"
+                f"  provider's limit allows it.\n\n  {NOTHING_LOST}\n"
+            )
+        self.sent = kept
+        self.links = {e["link"] for e in kept}
+        return format_candidates(kept)
 
 
 def make_search(name: str, profile: dict):

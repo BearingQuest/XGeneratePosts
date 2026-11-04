@@ -216,8 +216,39 @@ the shell wins, and `AI_POST_ENV_FILE` works only from the shell):
 | `AI_POST_PROVIDER_TIMEOUT` | `120` | Seconds to wait for a response. Applies to `groq` and `openai-compat` only; `anthropic` keeps its SDK's own timeout. Feed requests always time out after 15 seconds |
 | `AI_POST_RSS_PER_FEED` | `3` | Newest entries taken from each feed with `--search rss` |
 | `AI_POST_RSS_MAX_ENTRIES` | `20` | Most candidates sent to the model with `--search rss`, after the per-feed cap. Entries matching more of the topic's words go first, then newer ones. Lower it if Groq returns 413 |
+| `AI_POST_TOKEN_BUDGET` | `7000` | Most estimated prompt tokens with `--search rss`. The lowest-ranked entries are dropped until the prompt fits, after the `AI_POST_RSS_MAX_ENTRIES` cap. See "Rate limits and progress" below |
+| `AI_POST_RATE_LIMIT_WAIT` | `60` | Longest wait, in seconds, that `groq` and `openai-compat` will sit out on a 429 before retrying once. `0` turns the retry off |
 | `AI_POST_DATA_DIR` | `~/XPosts` | Where the profile, drafts, history and run log live |
 | `AI_POST_ENV_FILE` | `~/.ai_post_env` | The key file loaded at startup. Read from the shell environment only: the file can't name its own location, so setting it inside the file has no effect |
+
+### Rate limits and progress
+
+Groq's free plan allows 8,000 tokens a minute. A run that hits that limit
+gets HTTP 429 with a suggested wait. If the wait is at most
+`AI_POST_RATE_LIMIT_WAIT` seconds (default 60), the run counts it down on
+the terminal, for example "Groq's per-minute token limit: retrying in 27 s
+(Ctrl+C to cancel)", and then sends the same request once more. A second
+429, a longer wait (a daily limit, say) or no suggested wait stops with the
+usual message, and nothing is saved. A 413 (one request over the limit on
+its own) is never retried. `--provider anthropic` keeps its SDK's own retry
+policy.
+
+While a provider works on its answer, the run shows the seconds elapsed and
+then how long it took. On a terminal the line updates in place; when output
+goes to a file or a pipe, there is one line before and one after. Progress
+goes to stderr only, never to `run.log`.
+
+With `--search rss`, the run estimates the size of the whole prompt (UTF-8
+bytes divided by 4, which tends to over-count a little) and drops the
+lowest-ranked feed entries until it is within `AI_POST_TOKEN_BUDGET`. It
+says so when it does, for example "Sending 6 of 20 feed entries to fit the
+token budget". The profile's Beat, Voice, Experience, Never and Hashtags
+sections go into every prompt, so a long profile leaves room for fewer
+entries. If not even one entry fits, the run stops and gives the size of
+those sections. After a `groq` or `openai-compat` run, the `OK` line in
+`run.log` records the provider's token counts, for example
+`tokens: prompt 5723, completion 812, total 6535`, so you can check the
+estimate against them.
 
 ### Optional: publishing to X
 

@@ -24,6 +24,11 @@ GROQ_KEYS = "https://console.groq.com/keys"
 # timeout. Applies to groq and openai-compat; the anthropic SDK keeps its own.
 DEFAULT_PROVIDER_TIMEOUT = 120.0  # seconds, override with AI_POST_PROVIDER_TIMEOUT
 
+# R51: on a 429, wait the provider's suggested time plus a margin and retry
+# once, if the suggestion is at most AI_POST_RATE_LIMIT_WAIT (0 turns it off).
+DEFAULT_RATE_LIMIT_WAIT = 60  # seconds
+RATE_LIMIT_MARGIN = 1.0  # seconds added to the provider's suggestion
+
 HTTP_USER_AGENT = "XGeneratePosts/3 (+https://github.com/dustenatx/XGeneratePosts)"
 MAX_RESPONSE_BYTES = 2_000_000  # cap on any one provider response we read
 MAX_FEED_BYTES = 10_000_000  # feeds get their own cap; some run past 2 MB (R23)
@@ -37,6 +42,22 @@ DEFAULT_RSS_PER_FEED = 3  # newest entries per feed, override with AI_POST_RSS_P
 # Total candidates sent, best topic match first, override with
 # AI_POST_RSS_MAX_ENTRIES. Keeps one call under Groq's free 8,000 TPM (R22).
 DEFAULT_RSS_MAX_ENTRIES = 20
+# R53: with --search rss, the lowest-ranked candidates are dropped until the
+# whole prompt's estimated size is within AI_POST_TOKEN_BUDGET. 7,000 leaves
+# 1,000 of Groq's free 8,000 tokens per minute for the chat template and for
+# text that tokenizes denser than the estimate. The arithmetic is in
+# docs/decisions.md.
+DEFAULT_TOKEN_BUDGET = 7000
+# UTF-8 bytes per token for the estimate. English prose runs nearer 4.2 with
+# GPT-style tokenizers; on the 3 Nov rss request, bytes / 4 came to 8,811
+# against Groq's reported 8,344.
+BYTES_PER_TOKEN = 4
+# The prompt lists only the newest used URLs and titles. Each history entry
+# adds about 43 estimated tokens to every prompt, so at 60 an rss prompt
+# would pass the budget on its own after about 24 more runs. Dedup is not
+# weakened: is_used checks a pick against the whole history, and rss
+# candidates are filtered against it before they are sent (R53).
+PROMPT_USED_LIMIT = 20
 
 MAX_TWEET_TEXT = 255  # 280 minus ~24 chars X reserves for a t.co link
 MAX_LINKEDIN_TEXT = 1100  # hard ceiling; the prompt targets 750-950
@@ -129,6 +150,19 @@ def provider_timeout() -> float:
     return value
 
 
+def rate_limit_wait() -> int:
+    """Longest suggested wait, in seconds, that a 429 is retried after (R51)."""
+    raw = os.environ.get("AI_POST_RATE_LIMIT_WAIT", "").strip()
+    if not raw:
+        return DEFAULT_RATE_LIMIT_WAIT
+    if not (raw.isascii() and raw.isdigit()):
+        raise SystemExit(
+            "\nAI_POST_RATE_LIMIT_WAIT must be a whole number of seconds, 0 or more\n"
+            f"  (0 turns the retry off); got {raw!r}.\n"
+        )
+    return int(raw)
+
+
 def env_whole_number(var: str, default: int) -> int:
     raw = os.environ.get(var, "").strip()
     if not raw:
@@ -144,6 +178,10 @@ def rss_per_feed() -> int:
 
 def rss_max_entries() -> int:
     return env_whole_number("AI_POST_RSS_MAX_ENTRIES", DEFAULT_RSS_MAX_ENTRIES)
+
+
+def token_budget() -> int:
+    return env_whole_number("AI_POST_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET)
 
 
 # ---------------------------------------------------------------------------

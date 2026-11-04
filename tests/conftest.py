@@ -10,7 +10,7 @@ import urllib.response
 
 import pytest
 
-from xgenerateposts import net, storage
+from xgenerateposts import net, progress, storage
 
 ENV_VARS = (
     "AI_POST_PROVIDER",
@@ -18,6 +18,8 @@ ENV_VARS = (
     "AI_POST_PROVIDER_TIMEOUT",
     "AI_POST_RSS_PER_FEED",
     "AI_POST_RSS_MAX_ENTRIES",
+    "AI_POST_RATE_LIMIT_WAIT",
+    "AI_POST_TOKEN_BUDGET",
     "ANTHROPIC_API_KEY",
     "GROQ_API_KEY",
     "GROQ_MODEL",
@@ -51,6 +53,30 @@ def isolated(monkeypatch, tmp_path):
     return tmp_path
 
 
+class FakeClock:
+    """progress's clock and sleep: sleeping moves the clock, instantly."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """No unit test really waits on a retry countdown (R51)."""
+    fake = FakeClock()
+    monkeypatch.setattr(progress, "monotonic", fake.monotonic)
+    monkeypatch.setattr(progress, "sleep", fake.sleep)
+    return fake
+
+
 class FakeWeb(urllib.request.HTTPSHandler):
     """Serves registered URLs; anything else fails the test.
 
@@ -65,7 +91,11 @@ class FakeWeb(urllib.request.HTTPSHandler):
 
     def add(self, url, body=b"", status=200, headers=None):
         """body may be bytes, a dict (sent as JSON) or an exception to raise."""
-        self.routes[url] = (body, status, headers or {})
+        self.routes[url] = [(body, status, headers or {})]
+
+    def add_sequence(self, url, responses):
+        """(body, status, headers) tuples served in order; the last one repeats."""
+        self.routes[url] = list(responses)
 
     def redirect(self, url, location, status=301):
         self.add(url, status=status, headers={"Location": location})
@@ -74,7 +104,8 @@ class FakeWeb(urllib.request.HTTPSHandler):
         self.requests.append(req)
         if req.full_url not in self.routes:
             raise AssertionError(f"unexpected request to {req.full_url}")
-        body, status, headers = self.routes[req.full_url]
+        route = self.routes[req.full_url]
+        body, status, headers = route.pop(0) if len(route) > 1 else route[0]
         if isinstance(body, BaseException):
             raise body
         if isinstance(body, dict):

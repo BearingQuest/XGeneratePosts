@@ -1,9 +1,15 @@
 """Prompt scaffolding: platform mechanics. The voice comes from the profile.
 No I/O."""
 
+import math
 from datetime import date
 
-from xgenerateposts.config import MAX_LINKEDIN_TEXT, MAX_TWEET_TEXT
+from xgenerateposts.config import (
+    BYTES_PER_TOKEN,
+    MAX_LINKEDIN_TEXT,
+    MAX_TWEET_TEXT,
+    PROMPT_USED_LIMIT,
+)
 from xgenerateposts.feeds import clean_text
 
 X_RULES = """
@@ -123,6 +129,17 @@ one sentence: why you picked it
 """.strip()
 
 
+# The profile sections build_prompt sends, for the over-budget message (R53).
+PROMPT_SECTIONS = ("beat", "voice", "experience", "never", "hashtags")
+
+
+def estimate_tokens(text: str) -> int:
+    """A conservative token count with no tokenizer (R53): UTF-8 bytes over
+    BYTES_PER_TOKEN, rounded up. Bytes, not characters, so dashes, curly
+    quotes and non-Latin text count for more, as they do in tokenizers."""
+    return math.ceil(len(text.encode("utf-8")) / BYTES_PER_TOKEN)
+
+
 def build_prompt(
     profile: dict[str, str],
     topic: str,
@@ -152,8 +169,8 @@ def build_prompt(
         experience=block("Experience the author may reference", "experience"),
         never=block("Hard rules — never do these", "never"),
         hashtags=block("Preferred hashtags", "hashtags"),
-        used_urls="\n".join(f"- {u}" for u in used_urls[-60:]) or "- (none yet)",
-        used_titles="\n".join(f"- {clean_text(t, 200)}" for t in used_titles[-60:])
+        used_urls="\n".join(f"- {u}" for u in used_urls[-PROMPT_USED_LIMIT:]) or "- (none yet)",
+        used_titles="\n".join(f"- {clean_text(t, 200)}" for t in used_titles[-PROMPT_USED_LIMIT:])
         or "- (none yet)",
         x_rules=X_RULES.format(max_len=MAX_TWEET_TEXT),
         linkedin_rules=LINKEDIN_RULES.format(max_len=MAX_LINKEDIN_TEXT),
