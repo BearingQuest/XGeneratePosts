@@ -52,6 +52,12 @@ DEFAULT_TOKEN_BUDGET = 7000
 # GPT-style tokenizers; on the 3 Nov rss request, bytes / 4 came to 8,811
 # against Groq's reported 8,344.
 BYTES_PER_TOKEN = 4
+# The prompt lists only the newest used URLs and titles. Each history entry
+# adds about 43 estimated tokens to every prompt, so at 60 an rss prompt
+# would pass the budget on its own after about 24 more runs. Dedup is not
+# weakened: is_used checks a pick against the whole history, and rss
+# candidates are filtered against it before they are sent (R53).
+PROMPT_USED_LIMIT = 20
 
 MAX_TWEET_TEXT = 255  # 280 minus ~24 chars X reserves for a t.co link
 MAX_LINKEDIN_TEXT = 1100  # hard ceiling; the prompt targets 750-950

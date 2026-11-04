@@ -8,7 +8,7 @@ import pytest
 
 from tests.conftest import MODEL_OUTPUT, SENTINEL_KEY, completion
 from tests.test_rss import FEED_A, FEED_B, PROFILE, dated, rss
-from xgenerateposts import cli, config, feeds, prompt, providers, search
+from xgenerateposts import cli, config, dedup, feeds, prompt, providers, search
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 FULL_PROFILE = {"beat": "Practitioners.", "voice": "Plain.", **PROFILE}
@@ -20,6 +20,28 @@ def test_estimate_is_utf8_bytes_over_4_rounded_up():
     assert prompt.estimate_tokens("abcde") == 2
     assert prompt.estimate_tokens("—") == 1  # 3 bytes
     assert prompt.estimate_tokens("— — —") == 3  # 11 bytes, counted above its 5 characters
+
+
+def test_prompt_lists_only_the_20_newest_used_urls_and_titles():
+    history = [
+        {
+            "date": "2026-10-01",
+            "url": f"https://used.example/{n:02d}",
+            "title": f"Used title {n:02d}",
+        }
+        for n in range(30)
+    ]  # oldest first, as history.json is kept
+    used_urls, used_titles = dedup.used_from(history)
+    text = prompt.build_prompt(FULL_PROFILE, "Cloud", used_urls, used_titles)
+    assert config.PROMPT_USED_LIMIT == 20
+    for n in range(10, 30):
+        assert f"- https://used.example/{n:02d}\n" in text
+        assert f"- Used title {n:02d}\n" in text
+    for n in range(10):
+        assert f"https://used.example/{n:02d}" not in text
+        assert f"Used title {n:02d}" not in text
+    # Dedup still uses the whole history after the answer.
+    assert dedup.is_used("https://used.example/00", None, used_urls, used_titles)
 
 
 def test_default_budget_is_7000():
