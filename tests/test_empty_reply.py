@@ -8,9 +8,9 @@ import sys
 
 import pytest
 
-from tests.conftest import SENTINEL_KEY
+from tests.conftest import MODEL_OUTPUT, SENTINEL_KEY, completion
 from tests.test_rss import FEED_A, FEED_B, dated, rss
-from xgenerateposts import cli, config, providers
+from xgenerateposts import cli, config, prompt, providers
 
 
 def test_groq_rss_body_sends_low_reasoning_effort_for_gpt_oss():
@@ -151,8 +151,8 @@ def run_groq(monkeypatch, web, profile_file):
     web.add(FEED_B, b"x", status=503)
     monkeypatch.setenv("GROQ_API_KEY", SENTINEL_KEY)
 
-    def run(search, payload):
-        web.add(GROQ_URL, payload)
+    def run(search, payload, status=200):
+        web.add(GROQ_URL, payload, status=status)
         argv = ["daily_post.py", "--search", search, "--topic", "Cloud"]
         monkeypatch.setattr(sys, "argv", [*argv, "--profile", str(profile_file)])
         log = config.log_file()
@@ -183,3 +183,67 @@ def test_empty_reply_failed_line_is_one_line_without_reply_text(run_groq, capsys
     assert f"[via groq/openai/gpt-oss-120b, search {search}]" in lines[0]
     err = capsys.readouterr().err
     assert_clean(err + config.log_file().read_text())
+
+
+USAGE = {"prompt_tokens": 6412, "completion_tokens": 1750, "total_tokens": 8162}
+
+
+def sent(web):
+    return json.loads(web.requests[-1].data)["messages"][0]["content"]
+
+
+def with_usage(payload):
+    return {**payload, "usage": USAGE}
+
+
+@pytest.mark.parametrize("search", ["rss", "native"])
+def test_ok_line_has_the_estimate_beside_the_counts(run_groq, web, search):
+    added = run_groq(search, with_usage(completion(MODEL_OUTPUT)))
+    estimate = prompt.estimate_tokens(sent(web))
+    ok = [line for line in added if " OK — " in line]
+    assert len(ok) == 1
+    assert ok[0].endswith(
+        "(https://vendor.example/post) — tokens: prompt 6412, completion 1750, total 8162, "
+        f"estimate {estimate} [via groq/openai/gpt-oss-120b, search {search}]"
+    )
+
+
+@pytest.mark.parametrize("search", ["rss", "native"])
+def test_empty_reply_failed_line_has_the_counts_and_estimate(run_groq, web, search):
+    added = run_groq(search, with_usage(reply("length", content="", reasoning=REASONING)))
+    estimate = prompt.estimate_tokens(sent(web))
+    failed = [line for line in added if " FAILED — " in line]
+    assert len(failed) == 1
+    assert failed[0].endswith(
+        f'(finish_reason "length"; reasoning {len(REASONING)} characters; no tool calls). '
+        f"— tokens: prompt 6412, completion 1750, total 8162, estimate {estimate} "
+        f"[via groq/openai/gpt-oss-120b, search {search}]"
+    )
+
+
+def test_failure_after_a_reply_keeps_the_counts(run_groq, web):
+    added = run_groq("rss", with_usage(completion("no fields here")))
+    failed = [line for line in added if " FAILED — " in line]
+    assert len(failed) == 1
+    assert "could not be parsed" in failed[0]
+    estimate = prompt.estimate_tokens(sent(web))
+    assert (
+        f"— tokens: prompt 6412, completion 1750, total 8162, estimate {estimate} [via"
+        in (failed[0])
+    )
+
+
+def test_http_error_failed_line_has_no_tokens(run_groq, web):
+    added = run_groq("rss", with_usage({"error": {"message": "boom"}}), status=500)
+    failed = [line for line in added if " FAILED — " in line]
+    assert len(failed) == 1
+    assert "server error (500)" in failed[0]
+    assert "tokens:" not in failed[0]
+
+
+def test_ok_line_without_counts_has_no_estimate(run_groq):
+    added = run_groq("native", completion(MODEL_OUTPUT))
+    ok = [line for line in added if " OK — " in line]
+    assert len(ok) == 1
+    assert "tokens:" not in ok[0]
+    assert "estimate" not in ok[0]
