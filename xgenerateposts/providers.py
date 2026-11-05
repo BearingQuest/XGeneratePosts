@@ -234,6 +234,10 @@ class GroqProvider(OpenAICompatProvider):
     def request_body(self, prompt: str, native_search: bool) -> dict:
         body = super().request_body(prompt, native_search)
         if not native_search:
+            # R60: only gpt-oss is known to take it; GROQ_MODEL may name another
+            # model, which Groq answers with a 400 for an unsupported value.
+            if self.model.startswith("openai/gpt-oss-"):
+                body["reasoning_effort"] = "low"
             return body
         body["tools"] = [{"type": "browser_search"}]
         body["tool_choice"] = "required"
