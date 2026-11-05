@@ -9,6 +9,7 @@ from xgenerateposts import cli, dedup, search
 class CannedProvider:
     name = "canned"
     model = "m"
+    usage = None  # as AnthropicProvider: no token counts
 
     def __init__(self, text):
         self.text = text

@@ -18,7 +18,7 @@ from xgenerateposts.config import (
 )
 from xgenerateposts.dedup import is_used, used_from
 from xgenerateposts.fields import compose_posts, parse_fields, trim
-from xgenerateposts.prompt import build_prompt
+from xgenerateposts.prompt import build_prompt, estimate_tokens
 from xgenerateposts.providers import make_provider, select_provider
 from xgenerateposts.publish import post_to_linkedin, post_to_x
 from xgenerateposts.search import make_search, select_search
@@ -73,7 +73,12 @@ def generate_item(
                 file=sys.stderr,
             )
     prompt = build_prompt(profile, topic, used_urls, used_titles, candidates)
-    text = provider.generate(prompt, native_search=candidates is None)
+    try:
+        text = provider.generate(prompt, native_search=candidates is None)
+    finally:
+        # Set even when generate fails, so the FAILED line gets the counts.
+        # In native mode the estimate is of the prompt before search (R59).
+        storage.RUN_TOKENS = storage.token_note(provider.usage, estimate_tokens(prompt))
 
     try:
         item = parse_fields(text)
@@ -227,10 +232,8 @@ def run() -> None:
     )
     save_history(history)
     log_drafts(item, topic, x_post, li_post, bool(tweet_id), bool(li_id), storage.RUN_VIA)
-    tokens = ""
-    if provider.usage:  # R53: to check the token estimate against real figures
-        tokens = " — tokens: " + ", ".join(f"{k} {v}" for k, v in provider.usage.items())
-    log_run(f"OK — [{topic}] {item['title']} ({item['url']}){tokens}")
+    # R53, R59: to check the token estimate against real figures
+    log_run(f"OK — [{topic}] {item['title']} ({item['url']}){storage.RUN_TOKENS}")
 
     rule = "=" * 70
     print(rule)
@@ -277,10 +280,10 @@ def main() -> None:
         # Expected, explained failures: log the first line, print the message
         # as written, and exit without a traceback.
         if exc.code and isinstance(exc.code, str):
-            log_run(f"FAILED — {exc.code.strip().splitlines()[0]}")
+            log_run(f"FAILED — {exc.code.strip().splitlines()[0]}{storage.RUN_TOKENS}")
         raise
     except Exception as exc:
         # Genuinely unexpected: log it and let the traceback through, since
         # that is the useful artifact for an unknown bug.
-        log_run(f"FAILED — {type(exc).__name__}: {exc}")
+        log_run(f"FAILED — {type(exc).__name__}: {exc}{storage.RUN_TOKENS}")
         raise

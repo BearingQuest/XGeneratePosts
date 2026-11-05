@@ -161,7 +161,9 @@ def test_ok_line_records_usage_when_the_provider_returns_it(rss_run, isolated):
     rss_run.add(GROQ_URL, payload)
     cli.run()
     ok = [line for line in (isolated / "run.log").read_text().splitlines() if " OK — " in line]
-    assert ok[-1].count("tokens: prompt 5723, completion 812, total 6535 [via groq/") == 1
+    estimate = prompt.estimate_tokens(sent_prompt(rss_run))
+    note = f"tokens: prompt 5723, completion 812, total 6535, estimate {estimate} [via groq/"
+    assert ok[-1].count(note) == 1
 
 
 def test_ok_line_is_unchanged_without_usage(rss_run, isolated):

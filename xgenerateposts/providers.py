@@ -202,9 +202,16 @@ class OpenAICompatProvider:
         except KeyError, IndexError, TypeError:
             text = None
         if not isinstance(text, str) or not text.strip():
+            key = self.api_key()
             raise SystemExit(
-                f"\n{self.name} returned no text for model {self.model}.\n\n"
-                f"  Re-run — this is usually a one-off.\n\n  {NOTHING_LOST}\n"
+                net.redact(
+                    f"\n{self.name} returned no text for model {self.model} "
+                    f"({empty_reply_facts(payload, key)}).\n\n"
+                    f"  Re-run. If it happens again, send the FAILED line from\n"
+                    f"  {config.log_file()} — it holds no prompt or reply text.\n\n"
+                    f"  {NOTHING_LOST}\n",
+                    key,
+                )
             )
         return text
 
@@ -234,6 +241,10 @@ class GroqProvider(OpenAICompatProvider):
     def request_body(self, prompt: str, native_search: bool) -> dict:
         body = super().request_body(prompt, native_search)
         if not native_search:
+            # R60: only gpt-oss is known to take it; GROQ_MODEL may name another
+            # model, which Groq answers with a 400 for an unsupported value.
+            if self.model.startswith("openai/gpt-oss-"):
+                body["reasoning_effort"] = "low"
             return body
         body["tools"] = [{"type": "browser_search"}]
         body["tool_choice"] = "required"
@@ -318,6 +329,59 @@ def token_usage(payload: dict) -> dict[str, int] | None:
         if type(usage.get(f"{name}_tokens")) is int
     }
     return counts or None
+
+
+MAX_FACT = 40  # characters of a finish_reason or tool name shown (R58)
+MAX_TOOL_NAMES = 3
+
+
+def empty_reply_facts(payload: object, key: str = "") -> str:
+    """What a reply with no text held, for its error and FAILED line (R58):
+    finish_reason, and reasoning and tool calls by length, count and name
+    only, never their text. Never raises, whatever the payload's shape."""
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    if not isinstance(choice, dict):
+        return "no choices in the reply"
+    finish = choice.get("finish_reason")
+    finish = fact(finish, key) if isinstance(finish, str) else ""
+    facts = [f'finish_reason "{finish}"' if finish else "finish_reason none"]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return f"{facts[0]}; no message"
+
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        facts.append(f"reasoning {len(reasoning)} characters")
+    else:
+        facts.append("no reasoning")
+
+    calls = message.get("tool_calls")
+    calls = calls if isinstance(calls, list) else []
+    if calls:
+        names = [tool_name(call, key) for call in calls]
+        shown = ", ".join(names[:MAX_TOOL_NAMES])
+        if len(names) > MAX_TOOL_NAMES:
+            shown += f" +{len(names) - MAX_TOOL_NAMES} more"
+        plural = "s" if len(calls) > 1 else ""
+        facts.append(f"{len(calls)} tool call{plural}: {shown}")
+    else:
+        facts.append("no tool calls")
+    return "; ".join(facts)
+
+
+def tool_name(call: object, key: str) -> str:
+    function = call.get("function") if isinstance(call, dict) else None
+    name = function.get("name") if isinstance(function, dict) else None
+    return (fact(name, key) if isinstance(name, str) else "") or "?"
+
+
+def fact(text: str, key: str) -> str:
+    """A provider string fit for one log line: line breaks and other control
+    characters (including those str.splitlines splits on) become spaces, then
+    the R54 cleaning and key redaction."""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+", " ", text)
+    return clean_detail(text, key, MAX_FACT)
 
 
 def suggested_wait(headers, body: str) -> float | None:

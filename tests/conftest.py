@@ -50,6 +50,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_POST_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("AI_POST_ENV_FILE", str(tmp_path / "no.env"))
     monkeypatch.setattr(storage, "RUN_VIA", "")
+    monkeypatch.setattr(storage, "RUN_TOKENS", "")
     return tmp_path
 
 

@@ -246,9 +246,17 @@ token budget". The profile's Beat, Voice, Experience, Never and Hashtags
 sections go into every prompt, so a long profile leaves room for fewer
 entries. If not even one entry fits, the run stops and gives the size of
 those sections. After a `groq` or `openai-compat` run, the `OK` line in
-`run.log` records the provider's token counts, for example
-`tokens: prompt 5723, completion 812, total 6535`, so you can check the
-estimate against them.
+`run.log` records the provider's token counts beside the estimate, for
+example `tokens: prompt 5723, completion 812, total 6535, estimate 5890`,
+so you can check the estimate against them. A `FAILED` line has them too
+when the provider answered. With `--search native`, the estimate is of the
+prompt before search, so the gap shows how much the search results added.
+
+If a `groq` or `openai-compat` reply has no text, the `FAILED` line says
+why as far as the reply shows: its `finish_reason`, how many characters of
+reasoning it held, and how many tool calls, with their names. It never
+holds the reasoning, the tool arguments or the prompt. Re-run, and if it
+happens again, send that line.
 
 ### Optional: publishing to X
 

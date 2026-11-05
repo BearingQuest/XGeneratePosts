@@ -15,6 +15,16 @@ from xgenerateposts import config
 from xgenerateposts.author_profile import parse_profile
 
 RUN_VIA = ""  # "provider/model, search source" once main() has chosen them (R13)
+RUN_TOKENS = ""  # " — tokens: …" once the provider has given counts (R53, R59)
+
+
+def token_note(usage: dict[str, int] | None, estimate: int) -> str:
+    """The provider's token counts and the R53 estimate of the prompt as
+    sent, for the OK or FAILED line; empty without counts (R59)."""
+    if not usage:
+        return ""
+    counts = ", ".join(f"{k} {v}" for k, v in usage.items())
+    return f" — tokens: {counts}, estimate {estimate}"
 
 
 def log_run(message: str) -> None:
