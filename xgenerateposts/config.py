@@ -29,7 +29,7 @@ DEFAULT_PROVIDER_TIMEOUT = 120.0  # seconds, override with AI_POST_PROVIDER_TIME
 DEFAULT_RATE_LIMIT_WAIT = 60  # seconds
 RATE_LIMIT_MARGIN = 1.0  # seconds added to the provider's suggestion
 
-HTTP_USER_AGENT = "XGeneratePosts/3 (+https://github.com/dustenatx/XGeneratePosts)"
+HTTP_USER_AGENT = "XGeneratePosts/3 (+https://github.com/BearingQuest/questcast)"
 MAX_RESPONSE_BYTES = 2_000_000  # cap on any one provider response we read
 MAX_FEED_BYTES = 10_000_000  # feeds get their own cap; some run past 2 MB (R23)
 
